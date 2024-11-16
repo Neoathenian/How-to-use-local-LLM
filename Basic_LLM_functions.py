@@ -1,3 +1,4 @@
+import os
 import torch
 import gc
 import platform
@@ -40,12 +41,14 @@ def Get_answer_linux(question,model,tokenizer,system_prompt,max_new_tokens=1280)
 
 def Get_answer_windows(question,model,system_prompt,max_new_tokens=1280):
     """This function takes a question and returns the answer from the model. Input str question, output str."""
+    LLM_connection.model.pipeline._forward_params["max_new_tokens"]=max_new_tokens
+
     return model.invoke(f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>{system_prompt}<|eot_id|>
                                 <|start_header_id|>user<|end_header_id|>{question}<|eot_id|>
                                 <|start_header_id|>assistant<|end_header_id|>\n\n""")
 
     
-def Get_answer_OpenAI(question,system_prompt,client,model="gpt-4o-mini"):
+def Get_answer_OpenAI(question,system_prompt,client,model="gpt-4o-mini",max_new_tokens=1280):
     return client.chat.completions.create(
       model=model,
       messages=[
@@ -53,8 +56,23 @@ def Get_answer_OpenAI(question,system_prompt,client,model="gpt-4o-mini"):
         {"role": "user", "content": question}
       ],
       stream=False,
-      temperature=0.00000000001
+      temperature=0.00000000001,
+      max_completion_tokens=max_new_tokens
     ).choices[0].message.content
+
+
+
+def process_batch_windows(questions, model, system_prompt,max_new_tokens=1280):
+    LLM_connection.model.pipeline._forward_params["max_new_tokens"]=max_new_tokens
+    """Efficiently process a batch of questions."""
+    prompts = [
+        f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>{system_prompt}<|eot_id|>\n"
+        f"<|start_header_id|>user<|end_header_id|>{question}<|eot_id|>\n"
+        f"<|start_header_id|>assistant<|end_header_id|>\n\n"
+        for question in questions
+    ]
+    output=model.pipeline(prompts)
+    return [o[0]['generated_text'] for o in output]
 
 class LLM_Connection():
     """This class is to abstract away the api connection allowing for local models.
@@ -78,14 +96,29 @@ class LLM_Connection():
                 return None
         else:
             #we use an api
-            if self.api.lower() is "openai":
-                return Get_answer_OpenAI(prompt,self.system_prompt,self.client)
+            if self.api.lower() == "openai":
+                return Get_answer_OpenAI(prompt,self.system_prompt,self.client,max_new_tokens=max_new_tokens)
+    
+    def Get_answer_batch(self,questions):
+        """This function takes a list of questions and returns a list of answers. Input list of str questions, output list of str answers."""
+        if self.model is not None:
+            if self.os_name=="Windows":
+                return process_batch_windows(questions, self.model, self.system_prompt)
+            elif self.os_name=="Linux":
+                return [Get_answer_linux(question,self.model,self.tokenizer,self.system_prompt) for question in questions]
+            else:
+                print("OS not supported")
+                return None
+        else:
+            #we use an api
+            if self.api.lower() == "openai":
+                return [Get_answer_OpenAI(question,self.system_prompt,self.client) for question in questions]
 
     def set_model(self,model,tokenizer=None):
         self.model=model
         self.tokenizer=tokenizer
     
-    def load_model_from_path(self,path,max_seq_length=12800):
+    def load_model_from_path(self,path):
         """This function loads a model from a path. Input str path, output None.
             We do the imports here because some libraries are os dependent. -.-
             
@@ -96,8 +129,8 @@ class LLM_Connection():
             from transformers import AutoTokenizer
             from langchain_huggingface import HuggingFacePipeline
             import transformers
-            tokenizer = AutoTokenizer.from_pretrained(path)
-            tokenizer.pad_token_id=50256 #I don´t know why this is necessary, but it is
+            self.tokenizer = AutoTokenizer.from_pretrained(path)
+            self.tokenizer.pad_token_id=50256 #I don´t know why this is necessary, but it is
 
             pipeline = transformers.pipeline(
                     "text-generation",
@@ -105,12 +138,12 @@ class LLM_Connection():
                     torch_dtype=torch.float16,
                     device_map="auto",
                     return_full_text = False,
-                    max_length=max_seq_length,
+                    # max_length=max_seq_length,
                     truncation=True,
                     # top_p=0.9,
-                    eos_token_id=tokenizer.eos_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id,
                     num_return_sequences=1,
-                    pad_token_id=tokenizer.pad_token_id,
+                    pad_token_id=self.tokenizer.pad_token_id,
                 )
             self.model = HuggingFacePipeline(pipeline=pipeline, model_kwargs={'temperature':0.1})
             
@@ -120,7 +153,6 @@ class LLM_Connection():
 
             self.model, self.tokenizer = FastLanguageModel.from_pretrained(
                 model_name=path,  # Ensure this is the correct path
-                max_seq_length=max_seq_length,
                 load_in_8bit=False,
                 dtype=None,
                 local_files_only=True,
@@ -155,6 +187,11 @@ class LLM_Connection():
         # Force garbage collection
         gc.collect()
 
+        # Clear api
+        self.client = None
+        self.api = None
+        os.environ.pop('OPENAI_API_KEY', None)
+
 
     def load_api(self,api="OpenAI",dot_env_path=".env"):
         """Load the api connection."""
@@ -165,6 +202,7 @@ class LLM_Connection():
             load_dotenv(dot_env_path,override=True)
 
             self.client = OpenAI()
+            self.api=api
         else:
             print("API not supported")
 
