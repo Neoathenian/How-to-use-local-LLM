@@ -1,2 +1,5 @@
 Meta-Llama-3.1-8B-Instruct/
+LLMs/
 .env
+**/__pycache__/
+*__pycache__*
