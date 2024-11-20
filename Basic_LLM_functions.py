@@ -70,6 +70,15 @@ def get_answer_OpenAI(question,system_prompt,client,model="gpt-4o-mini",max_new_
     return out.choices[0].message.content
 
 def get_answer_llama(question,model,system_prompt,max_new_tokens=1280,stream=False):
+    def char_by_char_generator(original_generator):
+        """We want to prepare the generator to go character by character (if not it´d go word by word).
+            We also have to skip the first generation which is just the role of the speaker."""
+        for x in original_generator:
+            content = x.get("choices", [{}])[0].get("delta", {}).get("content")
+            if content:  # Only process if there is content
+                for char in content:  # Yield each character separately
+                    yield char
+
     out=model.create_chat_completion(
         messages = [
           {"role": "system", "content": system_prompt},
@@ -82,7 +91,7 @@ def get_answer_llama(question,model,system_prompt,max_new_tokens=1280,stream=Fal
         stream=stream
         )
     if stream:
-        return out
+        return filter_generator(out)
     return out["choices"][0]["message"]["content"]
 
 
@@ -122,7 +131,7 @@ class LLM_Connection():
 
     def get_answer(self,prompt,max_new_tokens=1280,stream=False):
         """Returns the answer from the model given a prompt. Input str prompt, output str.
-            However, if stream=True, it returns a generator object.
+            However, if stream=True, it returns a generator object which goes character by character.
         """
         if self.model_type == None:
             print("No model loaded")
